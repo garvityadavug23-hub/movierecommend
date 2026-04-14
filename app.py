@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import random
 import requests
+import ast
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- CONFIG ----------
 TMDB_API_KEY = "63c39d2a4b6cbbe2c300411d8980ade1"
@@ -15,17 +18,25 @@ def load_data():
 movies = load_data()
 movies = movies[['id','title','overview','genres','vote_average']].dropna()
 
-# ---------- SIMPLE RECOMMENDER (NO SKLEARN) ----------
-def recommend(movie):
-    indices = movies[movies['title'] == movie].index.tolist()
-    if not indices:
-        return []
-    idx = indices[0]
+# ---------- FIX GENRES ----------
+def convert(obj):
+    L = []
+    try:
+        for i in ast.literal_eval(obj):
+            L.append(i['name'])
+    except:
+        pass
+    return " ".join(L)
 
-    # return random 8 movies excluding selected one
-    all_indices = list(range(len(movies)))
-    all_indices.remove(idx)
-    return random.sample(all_indices, 8)
+movies['genres'] = movies['genres'].apply(convert)
+
+# ---------- MODEL ----------
+movies['tags'] = movies['overview'] + movies['genres']
+
+cv = CountVectorizer(max_features=5000, stop_words='english')
+vectors = cv.fit_transform(movies['tags']).toarray()
+
+similarity = cosine_similarity(vectors)
 
 # ---------- SESSION ----------
 if "watchlist" not in st.session_state:
@@ -77,37 +88,52 @@ def get_trailer(movie_id):
 
     return None
 
+# ---------- RECOMMEND ----------
+def recommend(movie):
+    idx_list = movies[movies['title'] == movie].index
+
+    if len(idx_list) == 0:
+        return []
+
+    idx = idx_list[0]
+    distances = list(enumerate(similarity[idx]))
+
+    return sorted(distances, key=lambda x:x[1], reverse=True)[1:9]
+
 # ---------- BUTTON ----------
 if st.button("🎥 Get Recommendations"):
 
     recs = recommend(selected_movie)
 
-    cols = st.columns(4)
+    if not recs:
+        st.warning("No recommendations found")
+    else:
+        cols = st.columns(4)
 
-    for i, idx in enumerate(recs):
-        movie = movies.iloc[idx]
+        for i, rec in enumerate(recs):
+            movie = movies.iloc[rec[0]]
 
-        score = random.randint(6,10)
-        stars = "⭐"*(score//2)
+            score = random.randint(6,10)
+            stars = "⭐"*(score//2)
 
-        with cols[i % 4]:
+            with cols[i % 4]:
 
-            st.image(get_poster(movie['id']))
+                st.image(get_poster(movie['id']))
 
-            with st.expander(f"{movie['title']} {stars} ({score}/10)"):
+                with st.expander(f"{movie['title']} {stars} ({score}/10)"):
 
-                st.write("IMDb:", movie['vote_average'])
-                st.write(movie['overview'][:200])
+                    st.write("IMDb:", movie['vote_average'])
+                    st.write(movie['overview'][:200])
 
-                trailer = get_trailer(movie['id'])
-                if trailer:
-                    st.video(trailer)
-                else:
-                    st.write("Trailer not available")
+                    trailer = get_trailer(movie['id'])
+                    if trailer:
+                        st.video(trailer)
+                    else:
+                        st.write("Trailer not available")
 
-                if st.button("➕ Add", key=f"a{i}"):
-                    if movie['title'] not in st.session_state.watchlist:
-                        st.session_state.watchlist.append(movie['title'])
+                    if st.button("➕ Add", key=f"a{i}"):
+                        if movie['title'] not in st.session_state.watchlist:
+                            st.session_state.watchlist.append(movie['title'])
 
 # ---------- WATCHLIST ----------
 st.sidebar.title("📌 Watchlist")
@@ -144,3 +170,4 @@ if st.session_state.selected_watch:
         trailer = get_trailer(movie['id'])
         if trailer:
             st.video(trailer)
+
