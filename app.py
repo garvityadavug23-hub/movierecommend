@@ -1,24 +1,34 @@
 import streamlit as st
 import pandas as pd
-import random
 import requests
 import ast
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------- CONFIG ----------
 TMDB_API_KEY = "63c39d2a4b6cbbe2c300411d8980ade1"
 IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 
-# ---------- LOAD ----------
+MOOD_GENRE_MAP = {
+    "Happy":     ["Comedy", "Animation", "Family", "Music"],
+    "Sad":       ["Drama", "Romance"],
+    "Thrilling": ["Thriller", "Action", "Crime", "Mystery"],
+    "Romantic":  ["Romance", "Drama"],
+}
+
+ERA_YEAR_MAP = {
+    "2000s": (2000, 2009),
+    "2010s": (2010, 2019),
+    "2020s": (2020, 2030),
+}
+
 @st.cache_data
 def load_data():
-    return pd.read_csv("tmdb_5000_movies.csv")
+    df = pd.read_csv("tmdb_5000_movies.csv")
+    return df
 
-movies = load_data()
-movies = movies[['id','title','overview','genres','vote_average']].dropna()
+movies_raw = load_data()
+movies_raw = movies_raw[['id', 'title', 'overview', 'genres', 'vote_average', 'release_date']].dropna()
 
-# ---------- FIX GENRES ----------
 def convert(obj):
     L = []
     try:
@@ -26,148 +36,161 @@ def convert(obj):
             L.append(i['name'])
     except:
         pass
-    return " ".join(L)
+    return L
 
-movies['genres'] = movies['genres'].apply(convert)
-
-# ---------- MODEL ----------
-movies['tags'] = movies['overview'] + movies['genres']
+movies_raw['genre_list'] = movies_raw['genres'].apply(convert)
+movies_raw['genres_str'] = movies_raw['genre_list'].apply(lambda x: " ".join(x))
+movies_raw['tags'] = movies_raw['overview'] + " " + movies_raw['genres_str']
 
 cv = CountVectorizer(max_features=5000, stop_words='english')
-vectors = cv.fit_transform(movies['tags']).toarray()
-
+vectors = cv.fit_transform(movies_raw['tags']).toarray()
 similarity = cosine_similarity(vectors)
 
-# ---------- SESSION ----------
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
-
 if "selected_watch" not in st.session_state:
     st.session_state.selected_watch = None
 
-# ---------- UI ----------
 st.set_page_config(layout="wide")
-st.title("🎬 CineAI FINAL PRO")
+st.title("🎬 CineAI PRO")
 
 col1, col2 = st.columns(2)
-
 with col1:
-    mood = st.selectbox("Mood", ["Happy","Sad","Thrilling","Romantic"])
-    genre = st.selectbox("Genre", ["Action","Comedy","Drama","Horror","Sci-Fi"])
-
+    mood = st.selectbox("Mood (optional)", ["Any", "Happy", "Sad", "Thrilling", "Romantic"])
+    genre = st.selectbox("Genre (optional)", ["Any", "Action", "Comedy", "Drama", "Horror", "Sci-Fi", "Romance", "Thriller", "Animation"])
 with col2:
-    era = st.selectbox("Era", ["2000s","2010s","2020s"])
-    text = st.text_input("Describe what you want")
+    era = st.selectbox("Era (optional)", ["Any", "2000s", "2010s", "2020s"])
+    text = st.text_input("Describe what you want (optional)")
 
-selected_movie = st.selectbox("Base Movie", movies['title'].values)
+selected_movie = st.selectbox("Base Movie (for similarity)", movies_raw['title'].values)
 
-# ---------- POSTER ----------
 def get_poster(movie_id):
     try:
         url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}"
         data = requests.get(url, timeout=5).json()
-
         if data.get("poster_path"):
             return f"{IMAGE_BASE}{data['poster_path']}"
     except:
         pass
-
     return "https://via.placeholder.com/300x450?text=No+Image"
 
-# ---------- TRAILER ----------
 def get_trailer(movie_id):
     try:
         url = f"https://api.themoviedb.org/3/movie/{movie_id}/videos?api_key={TMDB_API_KEY}"
         data = requests.get(url, timeout=5).json()
-
         for vid in data.get("results", []):
             if vid["type"] == "Trailer" and vid["site"] == "YouTube":
                 return f"https://www.youtube.com/watch?v={vid['key']}"
     except:
         pass
-
     return None
 
-# ---------- RECOMMEND ----------
-def recommend(movie):
-    idx_list = movies[movies['title'] == movie].index
-
+def recommend(movie, mood_filter, genre_filter, era_filter, text_filter):
+    idx_list = movies_raw[movies_raw['title'] == movie].index
     if len(idx_list) == 0:
         return []
 
     idx = idx_list[0]
-    distances = list(enumerate(similarity[idx]))
+    distances = sorted(list(enumerate(similarity[idx])), key=lambda x: x[1], reverse=True)[1:101]
 
-    return sorted(distances, key=lambda x:x[1], reverse=True)[1:9]
+    scored = []
+    for i, base_score in distances:
+        row = movies_raw.iloc[i]
+        boost = 0
 
-# ---------- BUTTON ----------
+        if genre_filter != "Any":
+            if genre_filter in row['genre_list']:
+                boost += 0.3
+
+        if mood_filter != "Any":
+            mood_genres = MOOD_GENRE_MAP.get(mood_filter, [])
+            if any(g in row['genre_list'] for g in mood_genres):
+                boost += 0.3
+
+        if era_filter != "Any":
+            try:
+                year = int(str(row['release_date'])[:4])
+                start, end = ERA_YEAR_MAP[era_filter]
+                if start <= year <= end:
+                    boost += 0.2
+            except:
+                pass
+
+        if text_filter.strip():
+            keywords = text_filter.lower().split()
+            overview_lower = str(row['overview']).lower()
+            matches = sum(1 for kw in keywords if kw in overview_lower)
+            if matches > 0:
+                boost += 0.1 * matches
+
+        scored.append((i, base_score + boost))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:8]
+
 if st.button("🎥 Get Recommendations"):
-
-    recs = recommend(selected_movie)
+    recs = recommend(selected_movie, mood, genre, era, text)
 
     if not recs:
-        st.warning("No recommendations found")
+        st.warning("No recommendations found.")
     else:
         cols = st.columns(4)
-
         for i, rec in enumerate(recs):
-            movie = movies.iloc[rec[0]]
-
-            score = random.randint(6,10)
-            stars = "⭐"*(score//2)
+            movie = movies_raw.iloc[rec[0]]
+            imdb = round(movie['vote_average'], 1)
+            stars = "⭐" * int(imdb // 2)
 
             with cols[i % 4]:
-
                 st.image(get_poster(movie['id']))
-
-                with st.expander(f"{movie['title']} {stars} ({score}/10)"):
-
-                    st.write("IMDb:", movie['vote_average'])
+                with st.expander(f"{movie['title']} {stars} ({imdb}/10)"):
+                    genre_tags = ", ".join(movie['genre_list']) if movie['genre_list'] else "N/A"
+                    st.caption(f"Genres: {genre_tags}")
+                    try:
+                        st.caption(f"Year: {str(movie['release_date'])[:4]}")
+                    except:
+                        pass
                     st.write(movie['overview'][:200])
-
                     trailer = get_trailer(movie['id'])
                     if trailer:
                         st.video(trailer)
                     else:
                         st.write("Trailer not available")
-
-                    if st.button("➕ Add", key=f"a{i}"):
+                    if st.button("➕ Add to Watchlist", key=f"a{i}"):
                         if movie['title'] not in st.session_state.watchlist:
                             st.session_state.watchlist.append(movie['title'])
+                            st.success(f"Added {movie['title']}!")
 
-# ---------- WATCHLIST ----------
 st.sidebar.title("📌 Watchlist")
+if not st.session_state.watchlist:
+    st.sidebar.caption("Your watchlist is empty.")
 
 for i, title in enumerate(st.session_state.watchlist):
-
-    col1, col2 = st.sidebar.columns([3,1])
-
-    if col1.button(title, key=f"view_{i}"):
+    c1, c2 = st.sidebar.columns([3, 1])
+    if c1.button(title, key=f"view_{i}"):
         st.session_state.selected_watch = title
         st.rerun()
-
-    if col2.button("❌", key=f"remove_{i}"):
+    if c2.button("❌", key=f"remove_{i}"):
         st.session_state.watchlist.remove(title)
         st.rerun()
 
-# ---------- DETAILS ----------
 if st.session_state.selected_watch:
-
-    movie = movies[movies['title']==st.session_state.selected_watch].iloc[0]
-
-    st.markdown("## 🎬 Selected Movie")
-
-    col1, col2 = st.columns([1,2])
-
-    with col1:
-        st.image(get_poster(movie['id']))
-
-    with col2:
-        st.write("Title:", movie['title'])
-        st.write("IMDb:", movie['vote_average'])
-        st.write(movie['overview'])
-
-        trailer = get_trailer(movie['id'])
-        if trailer:
-            st.video(trailer)
-
+    match = movies_raw[movies_raw['title'] == st.session_state.selected_watch]
+    if not match.empty:
+        movie = match.iloc[0]
+        st.markdown("---")
+        st.markdown("## 🎬 Selected Movie")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.image(get_poster(movie['id']))
+        with c2:
+            st.write("**Title:**", movie['title'])
+            st.write("**IMDb:**", movie['vote_average'])
+            st.write("**Genres:**", ", ".join(movie['genre_list']))
+            try:
+                st.write("**Year:**", str(movie['release_date'])[:4])
+            except:
+                pass
+            st.write(movie['overview'])
+            trailer = get_trailer(movie['id'])
+            if trailer:
+                st.video(trailer)
